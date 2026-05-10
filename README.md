@@ -7,4 +7,8 @@ Port 8091 (UPnP/SOAP) pour lancer les radios Port 8090 (REST XML Bose SoundTouch
 
 Sélection enceinte + radio avec persistance par cookies (30 jours) Contrôle du volume en temps réel via AJAX sans rechargement de page Mise en veille par simulation de la touche POWER Retour visuel discret (OK / Erreur) sur le volume
 
+# Installation
+
+C'est une application qui fonctionne avec votre serveur WEB. Pour adapter l'application à votre environnement, il faut changer les adresses IP des enceintes au début du programme, et juste en dessous ajouter vos chaines radios préférées
+
 Bonne écoute ! 🎵
