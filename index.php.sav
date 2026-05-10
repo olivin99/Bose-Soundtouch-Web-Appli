@@ -1,0 +1,221 @@
+<?php
+
+// ======================================================
+// CONFIGURATION
+// ======================================================
+
+$speakers = [
+    "BureauG" => "192.168.0.195",
+    "BureauD" => "192.168.0.181",
+    "Cuisine" => "192.168.0.225",
+    "Chambre" => "192.168.0.224"
+];
+
+$radios = [
+    "FIP"                 => "http://icecast.radiofrance.fr/fip-midfi.mp3",
+    "France Inter"        => "http://direct.franceinter.fr/live/franceinter-midfi.mp3",
+    "France Info"         => "http://direct.franceinfo.fr/live/franceinfo-midfi.mp3",
+    "Oui FM Classic Rock" => "http://ouifm3.ice.infomaniak.ch/ouifm3.mp3",
+    "Jazz Radio"          => "http://jazz-wr04.ice.infomaniak.ch/jazz-wr04-128.mp3",
+    "RTL"                 => "http://streaming.radio.rtl.fr/rtl-1-44-128",
+    "Oui FM Rock 90's"    => "http://nineties.ice.infomaniak.ch/ouifmnineties.mp3",
+    "RFM"                 => "http://rfm.lmn.fm/rfm.mp3",
+    "ABC Lounge Radio"    => "http://192.168.0.80:8000/radio.mp3",
+];
+
+// ======================================================
+// LANCEMENT RADIO
+// ======================================================
+
+$message = "";
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+
+    $speaker = $_POST['speaker'] ?? '';
+    $radio   = $_POST['radio'] ?? '';
+
+    if (isset($speakers[$speaker]) && isset($radios[$radio])) {
+
+        $ip  = $speakers[$speaker];
+        $url = $radios[$radio];
+
+        // ==========================================
+        // SET URI
+        // ==========================================
+
+        $xmlSetUri = '<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+            s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+  <s:Body>
+    <u:SetAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+      <InstanceID>0</InstanceID>
+      <CurrentURI>' . htmlspecialchars($url) . '</CurrentURI>
+      <CurrentURIMetaData></CurrentURIMetaData>
+    </u:SetAVTransportURI>
+  </s:Body>
+</s:Envelope>';
+
+        $ch = curl_init();
+
+        curl_setopt($ch, CURLOPT_URL, "http://$ip:8091/AVTransport/Control");
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Content-Type: text/xml; charset="utf-8"',
+            'SOAPACTION: "urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI"'
+        ]);
+
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $xmlSetUri);
+
+        curl_exec($ch);
+
+        // ==========================================
+        // PLAY
+        // ==========================================
+
+        $xmlPlay = '<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+            s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+  <s:Body>
+    <u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+      <InstanceID>0</InstanceID>
+      <Speed>1</Speed>
+    </u:Play>
+  </s:Body>
+</s:Envelope>';
+
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Content-Type: text/xml; charset="utf-8"',
+            'SOAPACTION: "urn:schemas-upnp-org:service:AVTransport:1#Play"'
+        ]);
+
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $xmlPlay);
+
+        curl_exec($ch);
+
+        curl_close($ch);
+
+        $message = "Lecture lancée sur $speaker : $radio";
+    }
+}
+
+?>
+
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title>Radio Bose</title>
+
+<style>
+
+body {
+    font-family: Arial, sans-serif;
+    background: #111;
+    color: white;
+    margin: 0;
+    padding: 20px;
+}
+
+.container {
+    max-width: 500px;
+    margin: auto;
+}
+
+.card {
+    background: #1e1e1e;
+    border-radius: 15px;
+    padding: 20px;
+}
+
+h1 {
+    text-align: center;
+}
+
+select,
+button {
+    width: 100%;
+    padding: 15px;
+    margin-top: 15px;
+    border: none;
+    border-radius: 10px;
+    font-size: 18px;
+}
+
+select {
+    background: #2a2a2a;
+    color: white;
+}
+
+button {
+    background: #00b894;
+    color: white;
+    font-weight: bold;
+}
+
+button:hover {
+    background: #00a383;
+}
+
+.message {
+    margin-top: 20px;
+    background: #2d3436;
+    padding: 15px;
+    border-radius: 10px;
+    text-align: center;
+}
+
+</style>
+</head>
+
+<body>
+
+<div class="container">
+
+    <div class="card">
+
+        <h1>🎵 Radio Bose</h1>
+
+        <form method="POST">
+
+            <label>Enceinte</label>
+
+            <select name="speaker" required>
+                <?php foreach ($speakers as $name => $ip): ?>
+                    <option value="<?= htmlspecialchars($name) ?>">
+                        <?= htmlspecialchars($name) ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+
+            <label>Radio</label>
+
+            <select name="radio" required>
+                <?php foreach ($radios as $name => $url): ?>
+                    <option value="<?= htmlspecialchars($name) ?>">
+                        <?= htmlspecialchars($name) ?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+
+            <button type="submit">
+                ▶ Lancer la radio
+            </button>
+
+        </form>
+
+        <?php if ($message): ?>
+            <div class="message">
+                <?= htmlspecialchars($message) ?>
+            </div>
+        <?php endif; ?>
+
+    </div>
+
+</div>
+
+</body>
+</html>
