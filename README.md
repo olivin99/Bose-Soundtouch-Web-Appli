@@ -1,5 +1,5 @@
 # Description
-Voici une appli maison (avec l'aide de l'IA :-) ) et fonctionnelle pour reprendre le contrôle de vos enceintes Bose sans dépendre du cloud. Voici un récapitulatif de ce qu'on a construit : Architecture double API
+Voici une appli maison et fonctionnelle pour reprendre le contrôle de vos enceintes Bose sans dépendre du cloud. Voici un récapitulatif de ce qu'on a construit : Architecture double API
 
 Port 8091 (UPnP/SOAP) pour lancer les radios Port 8090 (REST XML Bose SoundTouch) pour le volume et la mise en veille
 
