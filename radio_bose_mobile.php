@@ -11,6 +11,11 @@ $speakers = [
     "Chambre" => "192.168.0.224"
 ];
 
+// Groupes stereophoniques : envoient la commande a plusieurs enceintes d'un coup
+$groups = [
+    "Bureau" => ["192.168.0.195", "192.168.0.181"],
+];
+
 $radios = [
     "FIP"                 => "http://icecast.radiofrance.fr/fip-midfi.mp3",
     "France Inter"        => "http://direct.franceinter.fr/live/franceinter-midfi.mp3",
@@ -44,6 +49,67 @@ function soapRequest($ip, $path, $soapAction, $xmlBody) {
     return ['result' => $result, 'error' => $error];
 }
 
+// Applique les options communes pour minimiser la latence sur reseau local
+function _curlFast($ch, $url, $headers, $body) {
+    curl_setopt($ch, CURLOPT_URL,            $url);
+    curl_setopt($ch, CURLOPT_POST,           true);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT,        5);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 1);   // reseau local : 1s suffit
+    curl_setopt($ch, CURLOPT_TCP_NODELAY,    true); // desactive l'algo de Nagle
+    curl_setopt($ch, CURLOPT_HTTPHEADER,     $headers);
+    curl_setopt($ch, CURLOPT_POSTFIELDS,     $body);
+}
+
+// Boucle multi propre avec curl_multi_select (evite le busy-loop CPU)
+function _multiRun($mh, array $handles) {
+    $running = null;
+    do {
+        curl_multi_exec($mh, $running);
+        if ($running > 0) { curl_multi_select($mh, 0.01); }
+    } while ($running > 0);
+    $err = '';
+    foreach ($handles as $ch) {
+        $e = curl_error($ch);
+        if ($e) { $err = $e; }
+        curl_multi_remove_handle($mh, $ch);
+        curl_close($ch);
+    }
+    curl_multi_close($mh);
+    return $err;
+}
+
+// Envoie la meme requete SOAP a plusieurs IPs en parallele
+function soapMulti(array $ips, $path, $soapAction, $xmlBody) {
+    $mh      = curl_multi_init();
+    $handles = [];
+    foreach ($ips as $ip) {
+        $ch = curl_init();
+        _curlFast($ch, "http://$ip:8091$path", [
+            'Content-Type: text/xml; charset="utf-8"',
+            "SOAPACTION: \"$soapAction\""
+        ], $xmlBody);
+        curl_multi_add_handle($mh, $ch);
+        $handles[$ip] = $ch;
+    }
+    return _multiRun($mh, $handles);
+}
+
+// Envoie la meme requete REST Bose a plusieurs IPs en parallele
+function boseMulti(array $ips, $path, $xmlBody) {
+    $mh      = curl_multi_init();
+    $handles = [];
+    foreach ($ips as $ip) {
+        $ch = curl_init();
+        _curlFast($ch, "http://$ip:8090$path",
+            ['Content-Type: application/xml'],
+            $xmlBody);
+        curl_multi_add_handle($mh, $ch);
+        $handles[$ip] = $ch;
+    }
+    return _multiRun($mh, $handles);
+}
+
 function bosePost($ip, $path, $xmlBody) {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, "http://$ip:8090$path");
@@ -67,25 +133,88 @@ $savedSpeaker = $_COOKIE['bose_speaker'] ?? array_key_first($speakers);
 $savedRadio   = $_COOKIE['bose_radio']   ?? array_key_first($radios);
 $savedVolume  = intval($_COOKIE['bose_volume'] ?? 20);
 
-if (!isset($speakers[$savedSpeaker])) { $savedSpeaker = array_key_first($speakers); }
+if (!isset($speakers[$savedSpeaker]) && !isset($groups[$savedSpeaker])) { $savedSpeaker = "Bureau"; }
 if (!isset($radios[$savedRadio]))     { $savedRadio   = array_key_first($radios); }
 
 // ======================================================
 // ENDPOINT AJAX VOLUME
 // ======================================================
 
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'sleep') {
+    header('Content-Type: application/json');
+    $speaker = $_GET['speaker'] ?? '';
+    $ips = isset($groups[$speaker]) ? $groups[$speaker]
+         : (isset($speakers[$speaker]) ? [$speakers[$speaker]] : []);
+    if (empty($ips)) {
+        echo json_encode(['ok' => false, 'error' => 'Enceinte inconnue']);
+        exit;
+    }
+    $err = boseMulti($ips, '/key', '<key state="press" sender="Gabbo">POWER</key>');
+    echo json_encode(['ok' => !$err, 'error' => $err]);
+    exit;
+}
+
+if (isset($_GET['ajax']) && $_GET['ajax'] === 'play') {
+    header('Content-Type: application/json');
+    $speaker = $_GET['speaker'] ?? '';
+    $radio   = $_GET['radio']   ?? '';
+    $volume  = max(0, min(100, intval($_GET['volume'] ?? 20)));
+    setcookie('bose_speaker', $speaker, time() + 30 * 86400, '/');
+    setcookie('bose_radio',   $radio,   time() + 30 * 86400, '/');
+    $ips = isset($groups[$speaker]) ? $groups[$speaker]
+         : (isset($speakers[$speaker]) ? [$speakers[$speaker]] : []);
+    if (empty($ips) || !isset($radios[$radio])) {
+        echo json_encode(['ok' => false, 'error' => 'Parametre invalide']);
+        exit;
+    }
+    $url = $radios[$radio];
+    $xmlSetUri = '<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+            s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+  <s:Body>
+    <u:SetAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+      <InstanceID>0</InstanceID>
+      <CurrentURI>' . htmlspecialchars($url) . '</CurrentURI>
+      <CurrentURIMetaData></CurrentURIMetaData>
+    </u:SetAVTransportURI>
+  </s:Body>
+</s:Envelope>';
+    $xmlPlay = '<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+            s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+  <s:Body>
+    <u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+      <InstanceID>0</InstanceID>
+      <Speed>1</Speed>
+    </u:Play>
+  </s:Body>
+</s:Envelope>';
+    // 1) SetAVTransportURI sur toutes les IPs en parallele
+    $err = soapMulti($ips, '/AVTransport/Control',
+        'urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI', $xmlSetUri);
+    // 2) Play sur toutes les IPs en parallele (demarrage synchronise)
+    $err2 = soapMulti($ips, '/AVTransport/Control',
+        'urn:schemas-upnp-org:service:AVTransport:1#Play', $xmlPlay);
+    if ($err2) { $err = $err2; }
+    echo json_encode(['ok' => !$err, 'error' => $err]);
+    exit;
+}
+
 if (isset($_GET['ajax']) && $_GET['ajax'] === 'volume') {
     header('Content-Type: application/json');
     $speaker = $_GET['speaker'] ?? '';
     $volume  = max(0, min(100, intval($_GET['volume'] ?? 20)));
-    if (!isset($speakers[$speaker])) {
+    setcookie('bose_speaker', $speaker, time() + 30 * 86400, '/');
+    setcookie('bose_volume',  $volume,  time() + 30 * 86400, '/');
+    // Groupe ou enceinte seule
+    $ips = isset($groups[$speaker]) ? $groups[$speaker]
+         : (isset($speakers[$speaker]) ? [$speakers[$speaker]] : []);
+    if (empty($ips)) {
         echo json_encode(['ok' => false, 'error' => 'Enceinte inconnue']);
         exit;
     }
-    setcookie('bose_speaker', $speaker, time() + 30 * 86400, '/');
-    setcookie('bose_volume',  $volume,  time() + 30 * 86400, '/');
-    $r = bosePost($speakers[$speaker], '/volume', '<volume>' . $volume . '</volume>');
-    echo json_encode(['ok' => !$r['error'], 'error' => $r['error']]);
+    $err = boseMulti($ips, '/volume', '<volume>' . $volume . '</volume>');
+    echo json_encode(['ok' => !$err, 'error' => $err]);
     exit;
 }
 
@@ -103,7 +232,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $radio   = $_POST['radio']   ?? $savedRadio;
     $volume  = max(0, min(100, intval($_POST['volume'] ?? $savedVolume)));
 
-    if (isset($speakers[$speaker])) {
+    if (isset($speakers[$speaker]) || isset($groups[$speaker])) {
         setcookie('bose_speaker', $speaker, $cookieTTL, '/');
         $savedSpeaker = $speaker;
     }
@@ -114,11 +243,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     setcookie('bose_volume', $volume, $cookieTTL, '/');
     $savedVolume = $volume;
 
-    if (!isset($speakers[$speaker])) {
+    // Resoudre les IPs : groupe ou enceinte seule
+    $ips = isset($groups[$speaker]) ? $groups[$speaker]
+         : (isset($speakers[$speaker]) ? [$speakers[$speaker]] : []);
+
+    if (empty($ips)) {
         $message = "Enceinte inconnue.";
         $messageType = "error";
     } else {
-        $ip = $speakers[$speaker];
 
         if ($action === 'play') {
             if (!isset($radios[$radio])) {
@@ -147,17 +279,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     </u:Play>
   </s:Body>
 </s:Envelope>';
-                soapRequest($ip, '/AVTransport/Control',
+                soapMulti($ips, '/AVTransport/Control',
                     'urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI', $xmlSetUri);
-                soapRequest($ip, '/AVTransport/Control',
+                soapMulti($ips, '/AVTransport/Control',
                     'urn:schemas-upnp-org:service:AVTransport:1#Play', $xmlPlay);
-                $message = "Lecture lancee sur $speaker : $radio";
+                $label = isset($groups[$speaker]) ? $speaker . " (stereo)" : $speaker;
+                $message = "Lecture lancee sur $label : $radio";
                 $messageType = "success";
             }
         } elseif ($action === 'sleep') {
-            $r = bosePost($ip, '/key', '<key state="press" sender="Gabbo">POWER</key>');
-            $message = $r['error'] ? "Erreur : " . $r['error'] : "$speaker mis en veille";
-            $messageType = $r['error'] ? "error" : "success";
+            $err = boseMulti($ips, '/key', '<key state="press" sender="Gabbo">POWER</key>');
+            $label = isset($groups[$speaker]) ? $speaker . " (stereo)" : $speaker;
+            $message = $err ? "Erreur : $err" : "$label mis en veille";
+            $messageType = $err ? "error" : "success";
         }
     }
 }
@@ -317,13 +451,6 @@ html, body {
 }
 
 /* ---- Action buttons ---- */
-.action-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-    padding: 0 16px 16px;
-}
-
 .btn {
     padding: 18px 10px;
     border: none;
@@ -337,11 +464,32 @@ html, body {
     align-items: center;
     justify-content: center;
     gap: 8px;
+    width: 100%;
 }
 .btn:active { filter: brightness(.85); }
 
 .btn-play  { background: var(--green); color: #fff; }
-.btn-sleep { background: var(--input); color: #ccc; }
+.btn-sleep { background: var(--input); color: #ccc; font-size: 13px; padding: 10px; }
+
+/* Grille enceintes : chaque enceinte = colonne avec son bouton veille */
+.speaker-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 0 16px 16px;
+}
+.speaker-col {
+    flex: 1 1 80px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.btn-launch {
+    padding: 16px;
+    width: calc(100% - 32px);
+    margin: 0 16px 16px;
+    border-radius: 14px;
+}
 
 /* ---- Volume ---- */
 .volume-wrap {
@@ -444,6 +592,7 @@ input[type="range"]::-moz-range-thumb {
     z-index: 999;
 }
 .toast.show  { opacity: 1; }
+.toast.info    { background: #1e3a4a; color: #74b9ff; }
 .toast.success { background: #003d30; color: var(--green); }
 .toast.error   { background: #3d1515; color: #ff6b6b; }
 
@@ -462,15 +611,37 @@ input[type="range"]::-moz-range-thumb {
     <!-- Enceintes -->
     <div class="section">
         <div class="section-title">Enceinte</div>
-        <div class="pill-group" id="speaker-group">
-            <?php foreach ($speakers as $name => $ip): ?>
-            <div class="pill <?= ($name === $savedSpeaker) ? 'active' : '' ?>"
-                 data-speaker="<?= htmlspecialchars($name) ?>"
-                 onclick="selectSpeaker(this)">
-                <?= htmlspecialchars($name) ?>
+        <div class="speaker-grid" id="speaker-group">
+            <?php foreach ($groups as $name => $ips): ?>
+            <div class="speaker-col">
+                <div class="pill pill-group-item <?= ($name === $savedSpeaker) ? 'active' : '' ?>"
+                     data-speaker="<?= htmlspecialchars($name) ?>"
+                     onclick="selectSpeaker(this)">
+                    &#127911; <?= htmlspecialchars($name) ?>
+                </div>
+                <button class="btn btn-sleep" data-sp="<?= htmlspecialchars($name) ?>" onclick="sleepSpeaker(this.dataset.sp)">
+                    &#128164; Veille
+                </button>
+            </div>
+            <?php endforeach; ?>
+            <?php
+            $groupedIps = array_merge(...array_values($groups));
+            foreach ($speakers as $name => $ip):
+                if (in_array($ip, $groupedIps)) { continue; }
+            ?>
+            <div class="speaker-col">
+                <div class="pill <?= ($name === $savedSpeaker) ? 'active' : '' ?>"
+                     data-speaker="<?= htmlspecialchars($name) ?>"
+                     onclick="selectSpeaker(this)">
+                    <?= htmlspecialchars($name) ?>
+                </div>
+                <button class="btn btn-sleep" data-sp="<?= htmlspecialchars($name) ?>" onclick="sleepSpeaker(this.dataset.sp)">
+                    &#128164; Veille
+                </button>
             </div>
             <?php endforeach; ?>
         </div>
+        <button class="btn btn-play btn-launch" onclick="submitAction('play')">&#9654; Lancer la radio</button>
     </div>
 
     <!-- Radios -->
@@ -485,15 +656,6 @@ input[type="range"]::-moz-range-thumb {
                 <div class="radio-name"><?= htmlspecialchars($name) ?></div>
             </div>
             <?php endforeach; ?>
-        </div>
-    </div>
-
-    <!-- Actions -->
-    <div class="section">
-        <div class="section-title">Actions</div>
-        <div class="action-row">
-            <button class="btn btn-play"  onclick="submitAction('play')">&#9654; Lancer</button>
-            <button class="btn btn-sleep" onclick="submitAction('sleep')">&#128164; Veille</button>
         </div>
     </div>
 
@@ -546,14 +708,42 @@ function selectRadio(el) {
     document.querySelectorAll('.radio-item').forEach(function(r) { r.classList.remove('active'); });
     el.classList.add('active');
     currentRadio = el.dataset.radio;
+    playRadioAjax(currentSpeaker, currentRadio);
+}
+
+function playRadioAjax(speaker, radio) {
+    var status = document.getElementById('volume-status');
+    showToast('Lancement...', 'info');
+    fetch('?ajax=play&speaker=' + encodeURIComponent(speaker) + '&radio=' + encodeURIComponent(radio))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            showToast(data.ok ? 'Lecture lancee : ' + radio : 'Erreur : ' + data.error,
+                      data.ok ? 'success' : 'error');
+        })
+        .catch(function() { showToast('Erreur reseau', 'error'); });
 }
 
 function submitAction(action) {
+    if (action === 'play') {
+        playRadioAjax(currentSpeaker, currentRadio);
+        return;
+    }
     document.getElementById('hf-action').value  = action;
     document.getElementById('hf-speaker').value = currentSpeaker;
     document.getElementById('hf-radio').value   = currentRadio;
     document.getElementById('hf-volume').value  = document.getElementById('volume-slider').value;
     document.getElementById('hidden-form').submit();
+}
+
+function sleepSpeaker(speaker) {
+    showToast('Mise en veille...', 'info');
+    fetch('?ajax=sleep&speaker=' + encodeURIComponent(speaker))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            showToast(data.ok ? speaker + ' mis en veille' : 'Erreur : ' + data.error,
+                      data.ok ? 'success' : 'error');
+        })
+        .catch(function() { showToast('Erreur reseau', 'error'); });
 }
 
 // Volume
@@ -596,15 +786,17 @@ function adjustVolume(delta) {
     sendVolume(slider.value);
 }
 
+function showToast(msg, type) {
+    var t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className   = 'toast ' + (type || 'info') + ' show';
+    clearTimeout(t._timer);
+    t._timer = setTimeout(function() { t.classList.remove('show'); }, 3000);
+}
+
 // Toast (message POST)
 <?php if ($message): ?>
-(function() {
-    var t = document.getElementById('toast');
-    t.textContent = <?= json_encode($message) ?>;
-    t.className   = 'toast <?= $messageType ?>';
-    t.classList.add('show');
-    setTimeout(function() { t.classList.remove('show'); }, 3000);
-})();
+showToast(<?= json_encode($message) ?>, '<?= $messageType ?>');
 <?php endif; ?>
 
 </script>
